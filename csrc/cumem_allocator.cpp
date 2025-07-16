@@ -3,14 +3,14 @@
 // need to be unsigned long long
 #include <iostream>
 
-extern "C" {
-
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
 
 #include <sys/types.h>
 #include <cuda_runtime_api.h>
 #include <cuda.h>
+
+extern "C" {
 
 char error_msg[10240];  // 10KB buffer to store error messages
 CUresult no_error = CUresult(0);

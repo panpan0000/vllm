@@ -1,4 +1,5 @@
 // copied from https://github.com/ggerganov/llama.cpp/blob/b2899/ggml-common.h
+// 2025 - Modified by MetaX Integrated Circuits (Shanghai) Co., Ltd. All Rights Reserved. 
 #define QK_K 256
 #define K_QUANTS_PER_ITERATION 2
 #define WARP_SIZE_GGUF 32
@@ -1146,5 +1147,13 @@ static __device__ __forceinline__ uint32_t __vsub4(const uint32_t a, const uint3
            (static_cast<uint8_t>(((a & 0x00ff0000) >> 16) - ((b & 0x00ff0000) >> 16)) << 16) +
            (static_cast<uint8_t>(((a & 0x0000ff00) >>  8) - ((b & 0x0000ff00) >>  8)) <<  8) +
            (static_cast<uint8_t>(((a & 0x000000ff) >>  0) - ((b & 0x000000ff) >>  0)) <<  0);
+}
+#elif defined(USE_MACA)
+typedef int8_t int8x4_t __attribute__((ext_vector_type(4)));
+static __device__ __forceinline__ int __dp4a(const int a, const int b, int c) {
+    const int8x4_t va = reinterpret_cast<const int8x4_t&>(a);
+    const int8x4_t vb = reinterpret_cast<const int8x4_t&>(b);
+    c += va[0] * vb[0] + va[1] * vb[1] + va[2] * vb[2] + va[3] * vb[3];
+    return c;
 }
 #endif // defined(USE_ROCM)

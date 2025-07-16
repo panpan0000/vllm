@@ -1,3 +1,4 @@
+// 2025 - Modified by MetaX Integrated Circuits (Shanghai) Co., Ltd. All Rights Reserved. 
 #pragma once
 
 #include <torch/all.h>
@@ -30,8 +31,11 @@ torch::Tensor moe_wna16_gemm(torch::Tensor input, torch::Tensor output,
                              int64_t BLOCK_SIZE_K, int64_t bit);
 #endif
 
-bool moe_permute_unpermute_supported();
+#ifdef USE_MACA
 
-void shuffle_rows(const torch::Tensor& input_tensor,
-                  const torch::Tensor& dst2src_map,
-                  torch::Tensor& output_tensor);
+void fused_moe_kernel(const torch::Tensor& A, const torch::Tensor& B, const torch::Tensor& C,
+                    const torch::Tensor& topk_weights, const torch::Tensor& topk_ids,
+                    const torch::Tensor& sorted_token_ids, const torch::Tensor& expert_ids,
+                    const torch::Tensor& num_tokens_post_padded, bool mul_routed_weight, int64_t top_k, int64_t tileConfig);
+
+#endif

@@ -1,3 +1,4 @@
+// 2025 - Modified by MetaX Integrated Circuits (Shanghai) Co., Ltd. All Rights Reserved. 
 #pragma once
 
 /**
@@ -21,18 +22,17 @@ static __device__ __forceinline__ int8_t float_to_int8_rn(float const x) {
   // round
   float dst = std::nearbyint(x);
   // saturate
-
-  // See https://github.com/pytorch/pytorch/issues/127666
-  // See https://github.com/llvm/llvm-project/issues/95183
-  // hip-clang std::clamp __glibcxx_assert_fail host function when building on
-  // Arch/gcc14. The following replaces std::clamp usage with similar logic
-  // dst = std::clamp(dst, i8_min, i8_max);
-  dst = (dst < i8_min) ? i8_min : (dst > i8_max) ? i8_max : dst;
+  dst = std::clamp(dst, i8_min, i8_max);
   return static_cast<int8_t>(dst);
 #else
   // CUDA path
   uint32_t dst;
+#ifndef USE_MACA
   asm volatile("cvt.rni.sat.s8.f32 %0, %1;" : "=r"(dst) : "f"(x));
+#else
+  dst = (int32_t)(x > 0? x + 0.5: x - 0.5);
+  dst = (char)(dst > 127 ? 127 : (dst < -128 ? -128 : dst));
+#endif // USE_MACA
   return reinterpret_cast<const int8_t&>(dst);
 #endif
 }

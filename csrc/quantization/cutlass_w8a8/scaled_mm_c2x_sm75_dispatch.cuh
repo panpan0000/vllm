@@ -1,3 +1,4 @@
+// 2025 - Modified by MetaX Integrated Circuits (Shanghai) Co., Ltd. All Rights Reserved. 
 #pragma once
 
 #include "scaled_mm_c2x.cuh"
@@ -9,6 +10,7 @@
 
 namespace vllm {
 
+#ifndef USE_MACA
 template <typename InType, typename OutType,
           template <typename, typename> typename Epilogue>
 struct sm75_config_default {
@@ -66,6 +68,7 @@ struct sm75_config_M32 {
       cutlass_2x_gemm<cutlass::arch::Sm75, enable_sm75_to_sm80, InType, OutType,
                       Epilogue, TileShape, WarpShape, InstructionShape, 2>;
 };
+#endif // USE_MACA
 
 template <typename InType, typename OutType,
           template <typename, typename> typename Epilogue,
@@ -74,6 +77,7 @@ inline void cutlass_gemm_sm75_dispatch(torch::Tensor& out,
                                        torch::Tensor const& a,
                                        torch::Tensor const& b,
                                        EpilogueArgs&&... args) {
+#ifndef USE_MACA
   static_assert(std::is_same<InType, int8_t>());
   TORCH_CHECK(a.dtype() == torch::kInt8);
   TORCH_CHECK(b.dtype() == torch::kInt8);
@@ -118,6 +122,7 @@ inline void cutlass_gemm_sm75_dispatch(torch::Tensor& out,
     return fallback_cutlass_gemm_caller<Cutlass2xGemmDefault, FallbackGemm>(
         out, a, b, std::forward<EpilogueArgs>(args)...);
   }
+#endif
 }
 
 }  // namespace vllm

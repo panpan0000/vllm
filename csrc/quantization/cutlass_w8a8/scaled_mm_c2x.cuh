@@ -1,3 +1,4 @@
+// 2025 - Modified by MetaX Integrated Circuits (Shanghai) Co., Ltd. All Rights Reserved. 
 #pragma once
 #include <stddef.h>
 #include <torch/all.h>
@@ -6,6 +7,7 @@
 
 // clang-format will break include orders
 // clang-format off
+#ifndef USE_MACA
 #include "cute/tensor.hpp"
 #include "cute/atom/mma_atom.hpp"
 #include "cutlass/numeric_types.h"
@@ -20,6 +22,15 @@
 
 #include "cutlass/epilogue/threadblock/fusion/visitors.hpp"
 #include "cutlass/gemm/kernel/default_gemm_universal_with_visitor.h"
+
+#else
+#include "mctlass/mctlass_ex.h"
+#include "mctlass/half.h"
+#include "mctlass/layout/matrix.h"
+#include "mctlass/epilogue/thread/scale_type.h"
+#include "mctlass/util/command_line.h"
+#endif // USE_MACA
+
 
 #include "core/math.hpp"
 #include "cutlass_extensions/common.hpp"
@@ -42,6 +53,7 @@ namespace vllm {
 // reduce the size of the compiled binary.
 // __CUDA_ARCH__ is not defined in host code, so this lets us smuggle the ifdef
 // into code that will be executed on the device where it is defined.
+#ifndef USE_MACA
 template <typename Kernel>
 struct enable_sm75_to_sm80 : Kernel {
   template <typename... Args>
@@ -71,6 +83,9 @@ struct enable_sm89_to_sm90 : Kernel {
 #endif
   }
 };
+#endif // USE_MACA
+
+#ifndef USE_MACA
 template <typename Arch, template <typename> typename ArchGuard,
           typename ElementAB_, typename ElementD_,
           template <typename, typename> typename Epilogue_, typename TileShape,
@@ -128,11 +143,13 @@ struct cutlass_2x_gemm {
 
   using Op = cutlass::gemm::device::GemmUniversalAdapter<KernelType>;
 };
+#endif // USE_MACA
 
 template <typename Gemm, typename... EpilogueArgs>
 inline void cutlass_gemm_caller(torch::Tensor& out, torch::Tensor const& a,
                                 torch::Tensor const& b,
                                 EpilogueArgs&&... epilogue_params) {
+#ifndef USE_MACA
   using ElementAB = typename Gemm::ElementAB;
   using ElementD = typename Gemm::ElementD;
 
@@ -193,6 +210,7 @@ inline void cutlass_gemm_caller(torch::Tensor& out, torch::Tensor const& a,
   CUTLASS_CHECK(gemm_op.can_implement(args));
   cutlass::Status status = gemm_op(args, workspace.data_ptr(), stream);
   CUTLASS_CHECK(status);
+#endif // USE_MACA
 }
 
 template <typename Gemm, typename FallbackGemm, typename... EpilogueArgs>
@@ -200,6 +218,7 @@ inline void fallback_cutlass_gemm_caller(torch::Tensor& out,
                                          torch::Tensor const& a,
                                          torch::Tensor const& b,
                                          EpilogueArgs&&... args) {
+#ifndef USE_MACA
   // In some cases, the GPU isn't able to accommodate the
   // shared memory requirements of the Gemm. In such cases, use
   // the FallbackGemm instead.
@@ -220,6 +239,7 @@ inline void fallback_cutlass_gemm_caller(torch::Tensor& out,
     return cutlass_gemm_caller<FallbackGemm>(
         out, a, b, std::forward<EpilogueArgs>(args)...);
   }
+#endif // USE_MACA
 }
 
 }  // namespace vllm

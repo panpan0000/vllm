@@ -76,7 +76,7 @@ function (hipify_sources_target OUT_SRCS NAME ORIG_SRCS)
   set(CSRC_BUILD_DIR ${CMAKE_CURRENT_BINARY_DIR}/csrc)
   add_custom_target(
     hipify${NAME}
-    COMMAND ${Python_EXECUTABLE} ${CMAKE_SOURCE_DIR}/cmake/hipify.py -p ${CMAKE_SOURCE_DIR}/csrc -o ${CSRC_BUILD_DIR} ${SRCS}
+    COMMAND ${CMAKE_SOURCE_DIR}/cmake/hipify.py -p ${CMAKE_SOURCE_DIR}/csrc -o ${CSRC_BUILD_DIR} ${SRCS}
     DEPENDS ${CMAKE_SOURCE_DIR}/cmake/hipify.py ${SRCS}
     BYPRODUCTS ${HIP_SRCS}
     COMMENT "Running hipify on ${NAME} extension source files.")
@@ -89,7 +89,7 @@ endfunction()
 #
 # Get additional GPU compiler flags from torch.
 #
-function (get_torch_gpu_compiler_flags OUT_GPU_FLAGS GPU_LANG)
+function (get_torch_gpu_compiler_flags OUT_GPU_FLAGS GPU_LANG USE_MACA)
   if (${GPU_LANG} STREQUAL "CUDA")
     #
     # Get common NVCC flags from torch.
@@ -98,6 +98,19 @@ function (get_torch_gpu_compiler_flags OUT_GPU_FLAGS GPU_LANG)
       "from torch.utils.cpp_extension import COMMON_NVCC_FLAGS; print(';'.join(COMMON_NVCC_FLAGS))"
       "Failed to determine torch nvcc compiler flags")
 
+    if (USE_MACA)
+      message(WARNING "Use MACA, Overwrite GPU_FLAGS.")
+      set(GPU_FLAGS 
+        "-D__CUDA_NO_HALF_OPERATORS__"
+        "-D__CUDA_NO_HALF_CONVERSIONS__"
+        "-D__CUDA_NO_HALF2_OPERATORS__"
+        "--expt-relaxed-constexpr")
+      list(APPEND GPU_FLAGS 
+        "-mllvm" 
+        "-metaxgpu-GridDim-UseLdu")
+    endif()
+
+
     if (CUDA_VERSION VERSION_GREATER_EQUAL 11.8)
       list(APPEND GPU_FLAGS "-DENABLE_FP8")
     endif()
@@ -105,8 +118,11 @@ function (get_torch_gpu_compiler_flags OUT_GPU_FLAGS GPU_LANG)
       list(REMOVE_ITEM GPU_FLAGS
         "-D__CUDA_NO_HALF_OPERATORS__"
         "-D__CUDA_NO_HALF_CONVERSIONS__"
-        "-D__CUDA_NO_BFLOAT16_CONVERSIONS__"
         "-D__CUDA_NO_HALF2_OPERATORS__")
+      if (not USE_MACA)
+        list(REMOVE_ITEM GPU_FLAGS
+        "-D__CUDA_NO_BFLOAT16_CONVERSIONS__")
+      endif()
     endif()
 
   elseif(${GPU_LANG} STREQUAL "HIP")
@@ -147,6 +163,13 @@ macro(clear_cuda_arches CUDA_ARCH_FLAGS)
     # Extract all `-gencode` flags from `CMAKE_CUDA_FLAGS`
     string(REGEX MATCHALL "-gencode arch=[^ ]+" CUDA_ARCH_FLAGS
       ${CMAKE_CUDA_FLAGS})
+
+    # change the config's value of metaxgpu-disable-bsm-offset
+    string(REPLACE "-metaxgpu-disable-bsm-offset=1" "-metaxgpu-disable-bsm-offset=0"
+            CMAKE_CUDA_FLAGS ${CMAKE_CUDA_FLAGS})
+
+    # opt of cutlass w8a8
+    string(APPEND CMAKE_CUDA_FLAGS " -mllvm -structurizecfg-skip-uniform-regions=true")
 
     # Remove all `-gencode` flags from `CMAKE_CUDA_FLAGS` since they will be modified
     # and passed back via the `CUDA_ARCHITECTURES` property.
@@ -228,26 +251,11 @@ macro(set_gencode_flags_for_srcs)
                         "${multiValueArgs}" ${ARGN} )
 
   foreach(_ARCH ${arg_CUDA_ARCHS})
-    # handle +PTX suffix: generate both sm and ptx codes if requested
-    string(FIND "${_ARCH}" "+PTX" _HAS_PTX)
-    if(NOT _HAS_PTX EQUAL -1)
-      string(REPLACE "+PTX" "" _BASE_ARCH "${_ARCH}")
-      string(REPLACE "." "" _STRIPPED_ARCH "${_BASE_ARCH}")
-      set_gencode_flag_for_srcs(
-        SRCS ${arg_SRCS}
-        ARCH "compute_${_STRIPPED_ARCH}"
-        CODE "sm_${_STRIPPED_ARCH}")
-      set_gencode_flag_for_srcs(
-        SRCS ${arg_SRCS}
-        ARCH "compute_${_STRIPPED_ARCH}"
-        CODE "compute_${_STRIPPED_ARCH}")
-    else()
-      string(REPLACE "." "" _STRIPPED_ARCH "${_ARCH}")
-      set_gencode_flag_for_srcs(
-        SRCS ${arg_SRCS}
-        ARCH "compute_${_STRIPPED_ARCH}"
-        CODE "sm_${_STRIPPED_ARCH}")
-    endif()
+    string(REPLACE "." "" _ARCH "${_ARCH}")
+    set_gencode_flag_for_srcs(
+      SRCS ${arg_SRCS}
+      ARCH "compute_${_ARCH}"
+      CODE "sm_${_ARCH}")
   endforeach()
 
   if (${arg_BUILD_PTX_FOR_ARCH})
@@ -266,10 +274,7 @@ endmacro()
 #
 # For the given `SRC_CUDA_ARCHS` list of gencode versions in the form 
 #  `<major>.<minor>[letter]` compute the "loose intersection" with the 
-#  `TGT_CUDA_ARCHS` list of gencodes. We also support the `+PTX` suffix in
-#  `SRC_CUDA_ARCHS` which indicates that the PTX code should be built when there
-#  is a CUDA_ARCH in `TGT_CUDA_ARCHS` that is equal to or larger than the
-#  architecture in `SRC_CUDA_ARCHS`.
+#  `TGT_CUDA_ARCHS` list of gencodes. 
 # The loose intersection is defined as:
 #   { max{ x \in tgt | x <= y } | y \in src, { x \in tgt | x <= y } != {} }
 #  where `<=` is the version comparison operator.
@@ -286,63 +291,44 @@ endmacro()
 #   cuda_archs_loose_intersection(OUT_CUDA_ARCHS SRC_CUDA_ARCHS TGT_CUDA_ARCHS)
 #   OUT_CUDA_ARCHS="8.0;8.6;9.0;9.0a"
 #
-# Example With PTX:
-#   SRC_CUDA_ARCHS="8.0+PTX"
-#   TGT_CUDA_ARCHS="9.0"
-#   cuda_archs_loose_intersection(OUT_CUDA_ARCHS SRC_CUDA_ARCHS TGT_CUDA_ARCHS)
-#   OUT_CUDA_ARCHS="8.0+PTX"
-#
 function(cuda_archs_loose_intersection OUT_CUDA_ARCHS SRC_CUDA_ARCHS TGT_CUDA_ARCHS)
-  set(_SRC_CUDA_ARCHS "${SRC_CUDA_ARCHS}")
-  set(_TGT_CUDA_ARCHS ${TGT_CUDA_ARCHS})
-
-  # handle +PTX suffix: separate base arch for matching, record PTX requests
-  set(_PTX_ARCHS)
-  foreach(_arch ${_SRC_CUDA_ARCHS})
-    if(_arch MATCHES "\\+PTX$")
-      string(REPLACE "+PTX" "" _base "${_arch}")
-      list(APPEND _PTX_ARCHS "${_base}")
-      list(REMOVE_ITEM _SRC_CUDA_ARCHS "${_arch}")
-      list(APPEND _SRC_CUDA_ARCHS "${_base}")
-    endif()
-  endforeach()
-  list(REMOVE_DUPLICATES _PTX_ARCHS)
-  list(REMOVE_DUPLICATES _SRC_CUDA_ARCHS)
+  list(REMOVE_DUPLICATES SRC_CUDA_ARCHS)
+  set(TGT_CUDA_ARCHS_ ${TGT_CUDA_ARCHS})
 
   # if x.0a is in SRC_CUDA_ARCHS and x.0 is in CUDA_ARCHS then we should
   # remove x.0a from SRC_CUDA_ARCHS and add x.0a to _CUDA_ARCHS
   set(_CUDA_ARCHS)
-  if ("9.0a" IN_LIST _SRC_CUDA_ARCHS)
-    list(REMOVE_ITEM _SRC_CUDA_ARCHS "9.0a")
-    if ("9.0" IN_LIST TGT_CUDA_ARCHS)
-      list(REMOVE_ITEM _TGT_CUDA_ARCHS "9.0")
+  if ("9.0a" IN_LIST SRC_CUDA_ARCHS)
+    list(REMOVE_ITEM SRC_CUDA_ARCHS "9.0a")
+    if ("9.0" IN_LIST TGT_CUDA_ARCHS_)
+      list(REMOVE_ITEM TGT_CUDA_ARCHS_ "9.0")
       set(_CUDA_ARCHS "9.0a")
     endif()
   endif()
 
-  if ("10.0a" IN_LIST _SRC_CUDA_ARCHS)
-    list(REMOVE_ITEM _SRC_CUDA_ARCHS "10.0a")
+  if ("10.0a" IN_LIST SRC_CUDA_ARCHS)
+    list(REMOVE_ITEM SRC_CUDA_ARCHS "10.0a")
     if ("10.0" IN_LIST TGT_CUDA_ARCHS)
-      list(REMOVE_ITEM _TGT_CUDA_ARCHS "10.0")
+      list(REMOVE_ITEM TGT_CUDA_ARCHS_ "10.0")
       set(_CUDA_ARCHS "10.0a")
     endif()
   endif()
 
-  list(SORT _SRC_CUDA_ARCHS COMPARE NATURAL ORDER ASCENDING)
+  list(SORT SRC_CUDA_ARCHS COMPARE NATURAL ORDER ASCENDING)
 
   # for each ARCH in TGT_CUDA_ARCHS find the highest arch in SRC_CUDA_ARCHS that
   # is less or equal to ARCH (but has the same major version since SASS binary
   # compatibility is only forward compatible within the same major version).
-  foreach(_ARCH ${_TGT_CUDA_ARCHS})
+  foreach(_ARCH ${TGT_CUDA_ARCHS_})
     set(_TMP_ARCH)
     # Extract the major version of the target arch
     string(REGEX REPLACE "^([0-9]+)\\..*$" "\\1" TGT_ARCH_MAJOR "${_ARCH}")
-    foreach(_SRC_ARCH ${_SRC_CUDA_ARCHS})
+    foreach(_SRC_ARCH ${SRC_CUDA_ARCHS})
       # Extract the major version of the source arch
       string(REGEX REPLACE "^([0-9]+)\\..*$" "\\1" SRC_ARCH_MAJOR "${_SRC_ARCH}")
-      # Check version-less-or-equal, and allow PTX arches to match across majors
+      # Check major-version match AND version-less-or-equal
       if (_SRC_ARCH VERSION_LESS_EQUAL _ARCH)
-        if (_SRC_ARCH IN_LIST _PTX_ARCHS OR SRC_ARCH_MAJOR STREQUAL TGT_ARCH_MAJOR)
+        if (SRC_ARCH_MAJOR STREQUAL TGT_ARCH_MAJOR)
           set(_TMP_ARCH "${_SRC_ARCH}")
         endif()
       else()
@@ -358,18 +344,6 @@ function(cuda_archs_loose_intersection OUT_CUDA_ARCHS SRC_CUDA_ARCHS TGT_CUDA_AR
   endforeach()
 
   list(REMOVE_DUPLICATES _CUDA_ARCHS)
-  
-  # reapply +PTX suffix to architectures that requested PTX
-  set(_FINAL_ARCHS)
-  foreach(_arch ${_CUDA_ARCHS})
-    if(_arch IN_LIST _PTX_ARCHS)
-      list(APPEND _FINAL_ARCHS "${_arch}+PTX")
-    else()
-      list(APPEND _FINAL_ARCHS "${_arch}")
-    endif()
-  endforeach()
-  set(_CUDA_ARCHS ${_FINAL_ARCHS})
-  
   set(${OUT_CUDA_ARCHS} ${_CUDA_ARCHS} PARENT_SCOPE)
 endfunction()
 

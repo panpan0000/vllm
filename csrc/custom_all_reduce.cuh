@@ -1,3 +1,4 @@
+// 2025 - Modified by MetaX Integrated Circuits (Shanghai) Co., Ltd. All Rights Reserved. 
 #pragma once
 
 #include <cuda.h>
@@ -56,9 +57,15 @@ struct Signal {
   alignas(128) FlagType _flag[kMaxBlocks];  // incremental flags for each rank
 };
 
+#ifdef USE_MACA
+struct __align__(16) RankData { 
+  const void* ptrs[8]; 
+};
+#else
 struct __align__(16) RankData {
   const void* ptrs[8];
 };
+#endif // USE_MACA
 
 struct __align__(16) RankSignals {
   Signal* signals[8];
@@ -155,18 +162,21 @@ DINLINE O downcast(array_t<float, O::size> val) {
 #if !defined(USE_ROCM)
 
 static DINLINE void st_flag_release(FlagType* flag_addr, FlagType flag) {
-  #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 700
+#ifndef USE_MACA
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 700
   asm volatile("st.release.sys.global.u32 [%1], %0;" ::"r"(flag),
                "l"(flag_addr));
   #else
   asm volatile("membar.sys; st.volatile.global.u32 [%1], %0;" ::"r"(flag),
                "l"(flag_addr));
-  #endif
+#endif
+#endif // USE_MACA 
 }
 
 static DINLINE FlagType ld_flag_acquire(FlagType* flag_addr) {
   FlagType flag;
-  #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 700
+#ifndef USE_MACA
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 700
   asm volatile("ld.acquire.sys.global.u32 %0, [%1];"
                : "=r"(flag)
                : "l"(flag_addr));
@@ -174,19 +184,24 @@ static DINLINE FlagType ld_flag_acquire(FlagType* flag_addr) {
   asm volatile("ld.volatile.global.u32 %0, [%1]; membar.gl;"
                : "=r"(flag)
                : "l"(flag_addr));
-  #endif
+#endif
+#endif // USE_MACA
   return flag;
 }
 
 static DINLINE void st_flag_volatile(FlagType* flag_addr, FlagType flag) {
+#ifndef USE_MACA
   asm volatile("st.volatile.global.u32 [%1], %0;" ::"r"(flag), "l"(flag_addr));
+#endif // USE_MACA
 }
 
 static DINLINE FlagType ld_flag_volatile(FlagType* flag_addr) {
   FlagType flag;
+#ifndef USE_MACA
   asm volatile("ld.volatile.global.u32 %0, [%1];"
                : "=r"(flag)
                : "l"(flag_addr));
+#endif // USE_MACA
   return flag;
 }
 
@@ -365,7 +380,9 @@ __global__ void __launch_bounds__(512, 1)
 
 using IPC_KEY = std::array<uint8_t, sizeof(cudaIpcMemHandle_t)>;
 static_assert(sizeof(IPC_KEY) == sizeof(cudaIpcMemHandle_t));
+#ifndef USE_MACA
 static_assert(alignof(IPC_KEY) == alignof(cudaIpcMemHandle_t));
+#endif // USE_MACA
 
 class CustomAllreduce {
  public:

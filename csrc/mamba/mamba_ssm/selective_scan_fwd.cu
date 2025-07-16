@@ -1,5 +1,6 @@
 // clang-format off
 // adapted from https://github.com/state-spaces/mamba/blob/main/csrc/selective_scan/selective_scan_fwd_kernel.cuh
+// 2025 - Modified by MetaX Integrated Circuits (Shanghai) Co., Ltd. All Rights Reserved. 
 #include <torch/all.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
@@ -321,17 +322,27 @@ void selective_scan_fwd_launch(SSMParamsBase &params, cudaStream_t stream) {
             auto kernel = &selective_scan_fwd_kernel<Ktraits>;
             if (kSmemSize >= 48 * 1024) {
                 C10_CUDA_CHECK(cudaFuncSetAttribute(
-                    (void *) kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemSize));
+                    kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemSize));
             }
             kernel<<<grid, Ktraits::kNThreads, kSmemSize, stream>>>(params);
             C10_CUDA_KERNEL_LAUNCH_CHECK();
         });
     });
 }
-
+#define USE_MACA
 template<typename input_t, typename weight_t>
 void selective_scan_fwd_cuda(SSMParamsBase &params, cudaStream_t stream) {
-
+    #ifdef USE_MACA
+        if (params.seqlen <= 256) {
+            selective_scan_fwd_launch<64, 4, input_t, weight_t>(params, stream);
+        } else if (params.seqlen <= 512) {
+            selective_scan_fwd_launch<64, 8, input_t, weight_t>(params, stream);
+        } else if (params.seqlen <= 1024) {
+            selective_scan_fwd_launch<64, 16, input_t, weight_t>(params, stream);
+        } else {
+            selective_scan_fwd_launch<128, 16, input_t, weight_t>(params, stream);
+        }
+    #else
     #ifndef USE_ROCM
         if (params.seqlen <= 128) {           
             selective_scan_fwd_launch<32, 4, input_t, weight_t>(params, stream);
@@ -355,6 +366,7 @@ void selective_scan_fwd_cuda(SSMParamsBase &params, cudaStream_t stream) {
             selective_scan_fwd_launch<128, 16, input_t, weight_t>(params, stream);
         }
     #endif
+    #endif // USE_MACA
 }
 
 template void selective_scan_fwd_cuda<at::BFloat16, float>(SSMParamsBase &params, cudaStream_t stream);
@@ -649,7 +661,7 @@ void selective_scan_fwd(const torch::Tensor &u, const torch::Tensor &delta,
     
     // Otherwise the kernel will be launched from cuda:0 device
     // Cast to char to avoid compiler warning about narrowing
-    at::cuda::CUDAGuard device_guard{(char)u.get_device()};
+    at::cuda::CUDAGuard device_guard{static_cast<c10::DeviceIndex>(u.get_device())};
     auto stream = at::cuda::getCurrentCUDAStream().stream();
     DISPATCH_WTYPE_ITYPE_FLOAT_AND_HALF_AND_BF16(u.scalar_type(), "selective_scan_fwd", [&] {
         selective_scan_fwd_cuda<input_t, weight_t>(params, stream);

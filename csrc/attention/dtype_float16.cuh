@@ -1,4 +1,6 @@
 /*
+ * 2024 - Modified by MetaX Integrated Circuits (Shanghai) Co., Ltd. All Rights Reserved.
+ *
  * Adapted from
  * https://github.com/NVIDIA/FasterTransformer/blob/release/v5.3_tag/src/fastertransformer/kernels/decoder_masked_multihead_attention/decoder_masked_multihead_attention_template.hpp
  * and
@@ -22,7 +24,7 @@
 
 #include "attention_generic.cuh"
 #include "dtype_float32.cuh"
-
+#include "cuda_fp16.h"
 #ifdef USE_ROCM
   #include <hip/hip_fp16.h>
 #endif
@@ -69,6 +71,12 @@ struct FloatVec<uint4> {
 
 // Utility functions for type conversions.
 inline __device__ uint32_t h0_h0(uint16_t a) {
+#ifdef USE_MACA
+  uint32_t b;
+  b = a;
+  b = b << 16 | b;
+  return b;
+#else
 #ifndef USE_ROCM
   uint32_t b;
   asm volatile("mov.b32 %0, {%1, %1};" : "=r"(b) : "h"(a));
@@ -82,19 +90,35 @@ inline __device__ uint32_t h0_h0(uint16_t a) {
   tmp.u16[1] = a;
   return tmp.u32;
 #endif
+#endif  // USE_MACA
 }
 
 inline __device__ float half_to_float(uint16_t h) {
   float f;
+#ifdef USE_MACA
+  f = __half2float(*(__half*)&h);
+#else
 #ifndef USE_ROCM
   asm volatile("cvt.f32.f16 %0, %1;\n" : "=f"(f) : "h"(h));
 #else
   asm volatile("v_cvt_f32_f16 %0, %1;" : "=v"(f) : "v"(h));
 #endif
+#endif // USE_MACA
   return f;
 }
 
 inline __device__ float2 half2_to_float2(uint32_t v) {
+#ifdef USE_MACA
+  uint16_t lo, hi;
+  union {
+    uint32_t u32;
+    uint16_t u16[2];
+  } tmp;
+  tmp.u32 = v;
+  lo = tmp.u16[0];
+  hi = tmp.u16[1];
+  return make_float2(half_to_float(lo), half_to_float(hi));
+#else
 #ifndef USE_ROCM
   uint16_t lo, hi;
   asm volatile("mov.b32 {%0, %1}, %2;\n" : "=h"(lo), "=h"(hi) : "r"(v));
@@ -110,6 +134,7 @@ inline __device__ float2 half2_to_float2(uint32_t v) {
   ret.y = half_to_float(tmp.u16[1]);
   return ret;
 #endif
+#endif // USE_MACA
 }
 
 inline __device__ uint16_t float_to_half(float f) {
@@ -117,11 +142,16 @@ inline __device__ uint16_t float_to_half(float f) {
     uint32_t u32;
     uint16_t u16[2];
   } tmp;
+#ifdef USE_MACA
+  __half __tmp = __float2half(f);
+  tmp.u16[0] = *(uint16_t*)&__tmp;
+#else
 #ifndef USE_ROCM
   asm volatile("cvt.rn.f16.f32 %0, %1;\n" : "=h"(tmp.u16[0]) : "f"(f));
 #else
   asm volatile("v_cvt_f16_f32 %0, %1;\n" : "=v"(tmp.u32) : "v"(f));
 #endif
+#endif // USE MACA
   return tmp.u16[0];
 }
 
@@ -130,6 +160,15 @@ inline __device__ uint32_t float2_to_half2(float2 f) {
     uint32_t u32;
     uint16_t u16[2];
   } tmp;
+#ifdef USE_MACA
+  #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+  __half2 __tmp = __half2(__float2half(f.x), __float2half(f.y));
+  tmp.u32 = *(uint32_t*)&__tmp;
+  #else
+  tmp.u16[0] = float_to_half(f.x);
+  tmp.u16[1] = float_to_half(f.y);
+  #endif
+#else
 #ifndef USE_ROCM
   #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
   asm volatile("cvt.rn.f16x2.f32 %0, %1, %2;\n"
@@ -143,27 +182,42 @@ inline __device__ uint32_t float2_to_half2(float2 f) {
   tmp.u16[0] = float_to_half(f.x);
   tmp.u16[1] = float_to_half(f.y);
 #endif
+#endif // USE_MACA
   return tmp.u32;
 }
 
 // Vector addition.
 inline __device__ uint16_t add(uint16_t a, uint16_t b) {
   uint16_t c;
+#ifdef USE_MACA
+  unsigned short __a=(a);
+  unsigned short __b=(b);
+  __half __d=__hadd(*(__half*)&__a,*(__half*)&__b);
+  (c)=*(unsigned short*)&__d;
+#else
 #ifndef USE_ROCM
   asm volatile("add.f16 %0, %1, %2;\n" : "=h"(c) : "h"(a), "h"(b));
 #else
   asm volatile("v_add_f16 %0, %1, %2;\n" : "=v"(c) : "v"(a), "v"(b));
 #endif
+#endif // USE_MACA
   return c;
 }
 
 inline __device__ uint32_t add(uint32_t a, uint32_t b) {
   uint32_t c;
+#ifdef USE_MACA
+  unsigned int __a=(a);
+  unsigned int __b=(b);
+  __half2 __d=__hadd2(*(__half2*)&__a,*(__half2*)&__b);
+  (c)=*(unsigned int*)&__d;
+#else
 #ifndef USE_ROCM
   asm volatile("add.f16x2 %0, %1, %2;\n" : "=r"(c) : "r"(a), "r"(b));
 #else
   asm volatile("v_pk_add_f16 %0, %1, %2;\n" : "=v"(c) : "v"(a), "v"(b));
 #endif
+#endif // USE_MACA
   return c;
 }
 
@@ -208,22 +262,36 @@ inline __device__ Float8_ add(uint4 a, Float8_ fb) {
 template <>
 inline __device__ uint16_t mul(uint16_t a, uint16_t b) {
   uint16_t c;
+#ifdef USE_MACA
+  unsigned short __a=(a);
+  unsigned short __b=(b);
+  __half __d=__hmul(*(__half*)&__a,*(__half*)&__b);
+  (c)=*(unsigned short*)&__d;
+#else
 #ifndef USE_ROCM
   asm volatile("mul.f16 %0, %1, %2;\n" : "=h"(c) : "h"(a), "h"(b));
 #else
   asm volatile("v_mul_f16 %0, %1, %2;\n" : "=v"(c) : "v"(a), "v"(b));
 #endif
+#endif // USE_MACA
   return c;
 }
 
 template <>
 inline __device__ uint32_t mul(uint32_t a, uint32_t b) {
   uint32_t c;
+#ifdef USE_MACA
+  unsigned int __a=(a);
+  unsigned int __b=(b);
+  __half2 __d=__hmul2(*(__half2*)&__a,*(__half2*)&__b);
+  (c)=*(unsigned int*)&__d;
+#else
 #ifndef USE_ROCM
   asm volatile("mul.f16x2 %0, %1, %2;\n" : "=r"(c) : "r"(a), "r"(b));
 #else
   asm volatile("v_pk_mul_f16 %0, %1, %2;\n" : "=v"(c) : "v"(a), "v"(b));
 #endif
+#endif //USE_MACA
   return c;
 }
 
@@ -330,6 +398,13 @@ inline __device__ Float8_ mul(uint16_t a, uint4 b) {
 // Vector fused multiply-add.
 inline __device__ uint32_t fma(uint32_t a, uint32_t b, uint32_t c) {
   uint32_t d;
+#ifdef USE_MACA
+  unsigned int __a=(a);
+  unsigned int __b=(b);
+  unsigned int __c=(c);
+  __half2 __d=__hfma2(*(__half2*)&__a,*(__half2*)&__b,*(__half2*)&__c);
+  (d)=*(unsigned int*)&__d;
+#else
 #ifndef USE_ROCM
   asm volatile("fma.rn.f16x2 %0, %1, %2, %3;\n"
                : "=r"(d)
@@ -339,6 +414,7 @@ inline __device__ uint32_t fma(uint32_t a, uint32_t b, uint32_t c) {
                : "=v"(d)
                : "v"(a), "v"(b), "v"(c));
 #endif
+#endif // USE_MACA
   return d;
 }
 

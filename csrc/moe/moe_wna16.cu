@@ -1,4 +1,4 @@
-
+// 2025 - Modified by MetaX Integrated Circuits (Shanghai) Co., Ltd. All Rights Reserved. 
 #include <torch/all.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <ATen/cuda/CUDAContext.h>
@@ -85,9 +85,15 @@ __global__ void moe_wna16_gemm_kernel(
     if (threadIdx.x >= BLOCK_SIZE_N || offset_n >= size_n) return;
 
     float res[64];  // assume BLOCK_SIZE_M <= 64
+#ifndef USE_MACA
     scalar_t2 res2;
     scalar_t2 scale_f2;
     scalar_t2 qzero_f2;
+#else
+    scalar_t2 res2{};
+    scalar_t2 scale_f2{};
+    scalar_t2 qzero_f2{};
+#endif
 
     // note that (size_n * size_k * expert_id) may greater than 2 ** 31
     constexpr int8_t pack_factor = 32 / bit;
@@ -190,7 +196,9 @@ __global__ void moe_wna16_gemm_kernel(
       dequant<scalar_t2, bit>(expert_qweight_tmp[tmp_k % 4], weight_half2);
 
       for (int m = 0; m < num_valid_tokens; m++) {
+#ifndef USE_MACA
         res2 = {};
+#endif
 
 #pragma unroll
         for (int i = 0; i < 16 / bit; i++) {
