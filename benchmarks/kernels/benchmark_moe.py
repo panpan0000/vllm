@@ -4,6 +4,7 @@
 import argparse
 import gc
 import json
+import logging
 import os
 import time
 from contextlib import nullcontext
@@ -35,6 +36,8 @@ from vllm.transformers_utils.config import get_config
 from vllm.triton_utils import triton
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.torch_utils import set_random_seed
+
+logger = logging.getLogger(__name__)
 
 FP8_DTYPE = current_platform.fp8_dtype()
 
