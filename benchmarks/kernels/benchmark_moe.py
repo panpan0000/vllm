@@ -662,10 +662,11 @@ class BenchmarkWorker:
                 except RuntimeError as e:
                     if "PassManager::run failed" in str(e):
                         logger.debug(
-                            "RuntimeError for config %s, skip this config. Error is: %s",
-                            config,
-                            e,
-                        )
+                        "RuntimeError for config %s, skip this config. "
+                        "Error is: %s",
+                        config,
+                        e,
+                    )
                         continue
                     raise
 
