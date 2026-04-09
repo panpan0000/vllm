@@ -101,8 +101,8 @@ Key points from the example YAML:
       vllm serve meta-llama/Llama-3.1-405B-Instruct
         --tensor-parallel-size 8
         --pipeline-parallel-size 2
-        --nnodes=2
-        --node-rank=1
+        --nnodes 2
+        --node-rank 1
         --master-addr=$(ENTRY_ADDRESS)
         --headless
       # Previous Ray command:
