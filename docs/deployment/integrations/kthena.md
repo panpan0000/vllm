@@ -81,8 +81,8 @@ Key points from the example YAML:
       vllm serve meta-llama/Llama-3.1-405B-Instruct
         --tensor-parallel-size 8
         --pipeline-parallel-size 2
-        --nnodes=2
-        --node-rank=0
+        --nnodes 2
+        --node-rank 0
         --master-addr=$(ENTRY_ADDRESS)
         --port 8080
       # By default using implicit `--distributed-executor-backend mp`
