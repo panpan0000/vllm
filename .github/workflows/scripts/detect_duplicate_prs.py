@@ -2,11 +2,16 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 Detect duplicate PRs using text similarity + file overlap.
+
+Workflow overview:
+1. Load current PR metadata, text, and changed files.
+2. Fetch open PR candidates (excluding the current PR).
+3. Use text similarity for first-pass candidate ranking.
+4. Compute blended text+file similarity on top candidates.
+5. Upsert one bot comment; remove stale comment when no matches remain.
 """
 
 import os
-import re
-from datetime import datetime, timedelta, timezone
 
 import numpy as np
 import requests
@@ -46,20 +51,12 @@ if GITHUB_TOKEN:
     HEADERS["Authorization"] = f"Bearer {GITHUB_TOKEN}"
 
 SIMILARITY_THRESHOLD = 0.82
-SOFT_SIMILARITY_THRESHOLD = float(os.getenv("SOFT_SIMILARITY_THRESHOLD", "0.72"))
-TOP_K = int(os.getenv("TOP_K", "8"))
+TOP_K = 5
 MAX_OPEN_CANDIDATES = int(os.getenv("MAX_OPEN_CANDIDATES", "120"))
-FILE_COMPARE_TOP_N = int(os.getenv("FILE_COMPARE_TOP_N", "30"))
-TEXT_WEIGHT = float(os.getenv("TEXT_WEIGHT", "0.55"))
-FILE_WEIGHT = float(os.getenv("FILE_WEIGHT", "0.20"))
-PREFIX_WEIGHT = float(os.getenv("PREFIX_WEIGHT", "0.15"))
-TOKEN_WEIGHT = float(os.getenv("TOKEN_WEIGHT", "0.10"))
-SAME_AUTHOR_PENALTY = float(os.getenv("SAME_AUTHOR_PENALTY", "0.03"))
-PREFIX_DEPTH = int(os.getenv("PREFIX_DEPTH", "2"))
-TOKEN_MIN_LEN = int(os.getenv("TOKEN_MIN_LEN", "3"))
-TOKEN_MAX_COUNT = int(os.getenv("TOKEN_MAX_COUNT", "40"))
-MAX_MERGED_CANDIDATES = int(os.getenv("MAX_MERGED_CANDIDATES", "120"))
-RECENT_MERGED_DAYS = int(os.getenv("RECENT_MERGED_DAYS", "180"))
+FILE_COMPARE_TOP_N = int(os.getenv("FILE_COMPARE_TOP_N", "20"))
+TEXT_WEIGHT = 0.75
+FILE_WEIGHT = 0.25
+COMMENT_MARKER = "<!-- duplicate-pr-checker -->"
 
 
 def gh_get(url, params=None):
@@ -103,75 +100,6 @@ def jaccard_similarity(a, b):
     return len(sa & sb) / len(sa | sb)
 
 
-def path_prefix(path: str, depth: int = PREFIX_DEPTH):
-    parts = [p for p in path.split("/") if p]
-    if not parts:
-        return ""
-    return "/".join(parts[:depth])
-
-
-def path_prefix_similarity(a_paths, b_paths):
-    a_prefixes = [path_prefix(p) for p in a_paths]
-    b_prefixes = [path_prefix(p) for p in b_paths]
-    return jaccard_similarity(a_prefixes, b_prefixes)
-
-
-def extract_tokens(text: str):
-    # Keep alnum/underscore/hyphen tokens to preserve API and module names.
-    tokens = re.findall(r"[A-Za-z0-9_][A-Za-z0-9_-]*", (text or "").lower())
-    filtered = [t for t in tokens if len(t) >= TOKEN_MIN_LEN and not t.isdigit()]
-    return set(filtered[:TOKEN_MAX_COUNT])
-
-
-def token_similarity(a_text: str, b_text: str):
-    return jaccard_similarity(extract_tokens(a_text), extract_tokens(b_text))
-
-
-def parse_iso_time(value):
-    if not value:
-        return None
-    try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-
-
-def get_recent_merged_prs(days: int):
-    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
-    result = []
-    page = 1
-    while len(result) < MAX_MERGED_CANDIDATES:
-        prs = gh_get(
-            f"https://api.github.com/repos/{REPO}/pulls",
-            params={
-                "state": "closed",
-                "per_page": 50,
-                "page": page,
-                "sort": "updated",
-                "direction": "desc",
-            },
-        )
-        if not prs:
-            break
-        reached_cutoff = False
-        for pr in prs:
-            if pr["number"] == PR_NUMBER:
-                continue
-            if not pr.get("merged_at"):
-                continue
-            updated_at = parse_iso_time(pr.get("updated_at"))
-            if updated_at is None or updated_at < cutoff:
-                reached_cutoff = True
-                continue
-            result.append(pr)
-            if len(result) >= MAX_MERGED_CANDIDATES:
-                break
-        if len(prs) < 50 or reached_cutoff:
-            break
-        page += 1
-    return result
-
-
 def post_comment(issue_number, body):
     if DRY_RUN:
         print("DRY_RUN enabled: skip posting PR comment.")
@@ -181,18 +109,51 @@ def post_comment(issue_number, body):
     requests.post(url, headers=HEADERS, json={"body": body})
 
 
+def patch_comment(comment_id, body):
+    if DRY_RUN:
+        print(f"DRY_RUN enabled: skip updating comment {comment_id}.")
+        print(body)
+        return
+    url = f"https://api.github.com/repos/{REPO}/issues/comments/{comment_id}"
+    requests.patch(url, headers=HEADERS, json={"body": body})
+
+
+def delete_comment(comment_id):
+    if DRY_RUN:
+        print(f"DRY_RUN enabled: skip deleting comment {comment_id}.")
+        return
+    url = f"https://api.github.com/repos/{REPO}/issues/comments/{comment_id}"
+    requests.delete(url, headers=HEADERS)
+
+
+def find_existing_bot_comment(issue_number):
+    page = 1
+    while True:
+        comments = gh_get(
+            f"https://api.github.com/repos/{REPO}/issues/{issue_number}/comments",
+            params={"per_page": 100, "page": page},
+        )
+        if not comments:
+            return None
+        for comment in comments:
+            if COMMENT_MARKER in (comment.get("body") or ""):
+                return comment["id"]
+        if len(comments) < 100:
+            return None
+        page += 1
+
+
 def main():
     # 1. Load current PR context.
     current_pr = gh_get(f"https://api.github.com/repos/{REPO}/pulls/{PR_NUMBER}")
     current_text = build_pr_text(current_pr)
     current_emb = get_embedding(current_text)
     current_files = get_pr_files(PR_NUMBER)
-    current_author = (current_pr.get("user") or {}).get("login")
 
-    # 2. Fetch open PR candidates.
-    open_prs = []
+    # 2. Fetch open PR candidates (exclude current PR).
+    history_prs = []
     page = 1
-    while len(open_prs) < MAX_OPEN_CANDIDATES:
+    while len(history_prs) < MAX_OPEN_CANDIDATES:
         prs = gh_get(
             f"https://api.github.com/repos/{REPO}/pulls",
             params={
@@ -207,22 +168,14 @@ def main():
             break
         for pr in prs:
             if pr["number"] != PR_NUMBER:
-                open_prs.append(pr)
-                if len(open_prs) >= MAX_OPEN_CANDIDATES:
+                history_prs.append(pr)
+                if len(history_prs) >= MAX_OPEN_CANDIDATES:
                     break
         page += 1
         if len(prs) < 50:
             break
-    merged_prs = get_recent_merged_prs(RECENT_MERGED_DAYS)
-    seen_numbers = set()
-    history_prs = []
-    for pr in open_prs + merged_prs:
-        if pr["number"] in seen_numbers:
-            continue
-        seen_numbers.add(pr["number"])
-        history_prs.append(pr)
 
-    # 3. Stage-1: text-only retrieval for candidate pruning.
+    # 3. Stage-1: rank candidates by text similarity.
     text_results = []
     for pr in history_prs:
         text = build_pr_text(pr)
@@ -233,64 +186,59 @@ def main():
     text_results.sort(key=lambda x: -x[0])
     file_candidates = text_results[:FILE_COMPARE_TOP_N]
 
-    # 4. Stage-2: enrich with file/path/token features and weighted score.
+    # 4. Stage-2: score top candidates with text + file overlap.
     results = []
     for text_sim, pr in file_candidates:
         pr_files = get_pr_files(pr["number"])
         file_sim = jaccard_similarity(current_files, pr_files)
-        prefix_sim = path_prefix_similarity(current_files, pr_files)
-        pr_text = build_pr_text(pr)
-        token_sim = token_similarity(current_text, pr_text)
-        same_author = current_author and current_author == (pr.get("user") or {}).get(
-            "login"
-        )
-        author_penalty = SAME_AUTHOR_PENALTY if same_author else 0.0
-        final_sim = (
-            TEXT_WEIGHT * text_sim
-            + FILE_WEIGHT * file_sim
-            + PREFIX_WEIGHT * prefix_sim
-            + TOKEN_WEIGHT * token_sim
-            - author_penalty
-        )
-        results.append((final_sim, pr, text_sim, file_sim, prefix_sim, token_sim))
+        final_sim = TEXT_WEIGHT * text_sim + FILE_WEIGHT * file_sim
+        results.append((final_sim, pr, text_sim, file_sim))
 
     results.sort(key=lambda x: -x[0])
     top_results = [
-        (sim, pr, text_sim, file_sim, prefix_sim, token_sim)
-        for sim, pr, text_sim, file_sim, prefix_sim, token_sim in results[:TOP_K]
+        (sim, pr, text_sim, file_sim)
+        for sim, pr, text_sim, file_sim in results[:TOP_K]
         if sim >= SIMILARITY_THRESHOLD
-        or (
-            sim >= SOFT_SIMILARITY_THRESHOLD
-            and (prefix_sim >= 0.50 or token_sim >= 0.40)
-        )
     ]
 
-    # 5. Post comment when candidates are found.
+    # 5. Upsert bot comment
+    existing_comment_id = find_existing_bot_comment(PR_NUMBER)
     if not top_results:
-        print("No highly similar PRs found.")
+        if existing_comment_id is not None:
+            delete_comment(existing_comment_id)
+            print("Deleted stale duplicate checker comment.")
+        else:
+            print("No highly similar PRs found.")
         return
+
     lines = [
+        COMMENT_MARKER,
         "## 🔍 Potential Duplicate PRs Detected\n",
-        "The following open or recently merged PRs appear similar to this one:\n",
-        "| Score | Text | Files | Prefix | Tokens | PR | State | Title |",
-        "|---|---|---|---|---|---|---|---|",
+        "The following open PRs appear similar to this one:\n",
+        "| Score | Text | Files | PR | State | Title |",
+        "|---|---|---|---|---|---|",
     ]
-    for sim, pr, text_sim, file_sim, prefix_sim, token_sim in top_results:
+    for sim, pr, text_sim, file_sim in top_results:
         state_icon = (
             "🟢" if pr["state"] == "open" else ("🟣" if pr.get("merged_at") else "🔴")
         )
-        state_text = "merged" if pr.get("merged_at") else pr["state"]
         row = (
-            f"| {sim:.0%} | {text_sim:.0%} | {file_sim:.0%} | {prefix_sim:.0%} | "
-            f"{token_sim:.0%} | #{pr['number']} | {state_icon} {state_text} | "
+            f"| {sim:.0%} | {text_sim:.0%} | {file_sim:.0%} | "
+            f"#{pr['number']} | {state_icon} {pr['state']} | "
             f"[{pr['title']}]({pr['html_url']}) |"
         )
         lines.append(row)
     lines.append("\n> 🤖 Auto-detected by duplicate PR checker.")
     lines.append("Please review to avoid redundant work.")
-    post_comment(PR_NUMBER, "\n".join(lines))
-    print(f"Posted comment with {len(top_results)} similar PRs.")
+    body = "\n".join(lines)
+    if existing_comment_id is not None:
+        patch_comment(existing_comment_id, body)
+        print(f"Updated comment with {len(top_results)} similar PRs.")
+    else:
+        post_comment(PR_NUMBER, body)
+        print(f"Posted comment with {len(top_results)} similar PRs.")
 
 
 if __name__ == "__main__":
     main()
+
