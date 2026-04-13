@@ -2,7 +2,7 @@ name: Detect Duplicate PRs
 
 on:
   pull_request:
-    types: [opened, reopened]
+    types: [opened, reopened, synchronize, edited, ready_for_review]
 
 jobs:
   detect-duplicate:
@@ -27,3 +27,4 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
         run: python .github/workflows/scripts/detect_duplicate_prs.py
+

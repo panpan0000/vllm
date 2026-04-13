@@ -2,6 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 Detect duplicate PRs using text similarity + file overlap.
+
+Workflow overview:
+1. Load current PR metadata, text, and changed files.
+2. Fetch open PR candidates (excluding the current PR).
+3. Use text similarity for first-pass candidate ranking.
+4. Compute blended text+file similarity on top candidates.
+5. Upsert one bot comment; remove stale comment when no matches remain.
 """
 
 import os
@@ -49,6 +56,7 @@ MAX_OPEN_CANDIDATES = int(os.getenv("MAX_OPEN_CANDIDATES", "120"))
 FILE_COMPARE_TOP_N = int(os.getenv("FILE_COMPARE_TOP_N", "20"))
 TEXT_WEIGHT = 0.75
 FILE_WEIGHT = 0.25
+COMMENT_MARKER = "<!-- duplicate-pr-checker -->"
 
 
 def gh_get(url, params=None):
@@ -101,14 +109,48 @@ def post_comment(issue_number, body):
     requests.post(url, headers=HEADERS, json={"body": body})
 
 
+def patch_comment(comment_id, body):
+    if DRY_RUN:
+        print(f"DRY_RUN enabled: skip updating comment {comment_id}.")
+        print(body)
+        return
+    url = f"https://api.github.com/repos/{REPO}/issues/comments/{comment_id}"
+    requests.patch(url, headers=HEADERS, json={"body": body})
+
+
+def delete_comment(comment_id):
+    if DRY_RUN:
+        print(f"DRY_RUN enabled: skip deleting comment {comment_id}.")
+        return
+    url = f"https://api.github.com/repos/{REPO}/issues/comments/{comment_id}"
+    requests.delete(url, headers=HEADERS)
+
+
+def find_existing_bot_comment(issue_number):
+    page = 1
+    while True:
+        comments = gh_get(
+            f"https://api.github.com/repos/{REPO}/issues/{issue_number}/comments",
+            params={"per_page": 100, "page": page},
+        )
+        if not comments:
+            return None
+        for comment in comments:
+            if COMMENT_MARKER in (comment.get("body") or ""):
+                return comment["id"]
+        if len(comments) < 100:
+            return None
+        page += 1
+
+
 def main():
-    # 1. 获取当前 PR 信息
+    # 1. Load current PR context.
     current_pr = gh_get(f"https://api.github.com/repos/{REPO}/pulls/{PR_NUMBER}")
     current_text = build_pr_text(current_pr)
     current_emb = get_embedding(current_text)
     current_files = get_pr_files(PR_NUMBER)
 
-    # 2. 拉取 open PR（排除自身，限制候选规模）
+    # 2. Fetch open PR candidates (exclude current PR).
     history_prs = []
     page = 1
     while len(history_prs) < MAX_OPEN_CANDIDATES:
@@ -133,7 +175,7 @@ def main():
         if len(prs) < 50:
             break
 
-    # 3. 第一阶段：文本相似度筛候选
+    # 3. Stage-1: rank candidates by text similarity.
     text_results = []
     for pr in history_prs:
         text = build_pr_text(pr)
@@ -144,7 +186,7 @@ def main():
     text_results.sort(key=lambda x: -x[0])
     file_candidates = text_results[:FILE_COMPARE_TOP_N]
 
-    # 4. 第二阶段：仅对Top候选拉取文件并融合得分
+    # 4. Stage-2: score top candidates with text + file overlap.
     results = []
     for text_sim, pr in file_candidates:
         pr_files = get_pr_files(pr["number"])
@@ -159,12 +201,18 @@ def main():
         if sim >= SIMILARITY_THRESHOLD
     ]
 
-    # 5. 发评论
+    # 5. Upsert bot comment
+    existing_comment_id = find_existing_bot_comment(PR_NUMBER)
     if not top_results:
-        print("No highly similar PRs found.")
+        if existing_comment_id is not None:
+            delete_comment(existing_comment_id)
+            print("Deleted stale duplicate checker comment.")
+        else:
+            print("No highly similar PRs found.")
         return
 
     lines = [
+        COMMENT_MARKER,
         "## 🔍 Potential Duplicate PRs Detected\n",
         "The following open PRs appear similar to this one:\n",
         "| Score | Text | Files | PR | State | Title |",
@@ -182,9 +230,15 @@ def main():
         lines.append(row)
     lines.append("\n> 🤖 Auto-detected by duplicate PR checker.")
     lines.append("Please review to avoid redundant work.")
-    post_comment(PR_NUMBER, "\n".join(lines))
-    print(f"Posted comment with {len(top_results)} similar PRs.")
+    body = "\n".join(lines)
+    if existing_comment_id is not None:
+        patch_comment(existing_comment_id, body)
+        print(f"Updated comment with {len(top_results)} similar PRs.")
+    else:
+        post_comment(PR_NUMBER, body)
+        print(f"Posted comment with {len(top_results)} similar PRs.")
 
 
 if __name__ == "__main__":
     main()
+
