@@ -50,9 +50,12 @@ HEADERS = {"Accept": "application/vnd.github+json"}
 if GITHUB_TOKEN:
     HEADERS["Authorization"] = f"Bearer {GITHUB_TOKEN}"
 
-SIMILARITY_THRESHOLD = 0.82
+SIMILARITY_THRESHOLD = float(os.getenv("SIMILARITY_THRESHOLD", "0.75"))
 TOP_K = 5
-MAX_OPEN_CANDIDATES = int(os.getenv("MAX_OPEN_CANDIDATES", "120"))
+MAX_CANDIDATES = int(
+    os.getenv("MAX_CANDIDATES", os.getenv("MAX_OPEN_CANDIDATES", "120"))
+)
+PR_CANDIDATE_STATE = os.getenv("PR_CANDIDATE_STATE", "all")
 FILE_COMPARE_TOP_N = int(os.getenv("FILE_COMPARE_TOP_N", "20"))
 TEXT_WEIGHT = 0.75
 FILE_WEIGHT = 0.25
@@ -150,14 +153,14 @@ def main():
     current_emb = get_embedding(current_text)
     current_files = get_pr_files(PR_NUMBER)
 
-    # 2. Fetch open PR candidates (exclude current PR).
+    # 2. Fetch PR candidates (exclude current PR).
     history_prs = []
     page = 1
-    while len(history_prs) < MAX_OPEN_CANDIDATES:
+    while len(history_prs) < MAX_CANDIDATES:
         prs = gh_get(
             f"https://api.github.com/repos/{REPO}/pulls",
             params={
-                "state": "open",
+                "state": PR_CANDIDATE_STATE,
                 "per_page": 50,
                 "page": page,
                 "sort": "updated",
@@ -169,7 +172,7 @@ def main():
         for pr in prs:
             if pr["number"] != PR_NUMBER:
                 history_prs.append(pr)
-                if len(history_prs) >= MAX_OPEN_CANDIDATES:
+                if len(history_prs) >= MAX_CANDIDATES:
                     break
         page += 1
         if len(prs) < 50:
@@ -213,9 +216,10 @@ def main():
 
     lines = [
         COMMENT_MARKER,
-        "## 🔍 Potential Duplicate PRs Detected\n",
-        "The following open PRs appear similar to this one:\n",
-        "| Score | Text | Files | PR | State | Title |",
+        "## 🔍 Potentially Related PRs\n",
+        f"The following {PR_CANDIDATE_STATE} PRs may be related to this PR, and could overlap in intent or implementation:\n",
+        "If this is intentional and complementary work, feel free to ignore this notice.\n",
+        "| Match Score | Desc Similarity | Files Overlap | PR # | State | Title |",
         "|---|---|---|---|---|---|",
     ]
     for sim, pr, text_sim, file_sim in top_results:
@@ -228,8 +232,10 @@ def main():
             f"[{pr['title']}]({pr['html_url']}) |"
         )
         lines.append(row)
-    lines.append("\n> 🤖 Auto-detected by duplicate PR checker.")
-    lines.append("Please review to avoid redundant work.")
+    lines.append("\n> 🤖 Auto-detected by similarity signals (title/body/files).")
+    lines.append(
+        "This is a soft hint only. Please review manually to determine whether these are related work or true duplicates."
+    )
     body = "\n".join(lines)
     if existing_comment_id is not None:
         patch_comment(existing_comment_id, body)
@@ -241,4 +247,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
