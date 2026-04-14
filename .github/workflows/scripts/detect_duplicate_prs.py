@@ -9,9 +9,14 @@ Workflow overview:
 3. Use text similarity for first-pass candidate ranking.
 4. Compute blended text+file similarity on top candidates.
 5. Upsert one bot comment; remove stale comment when no matches remain.
+
+Local debug example:
+GITHUB_TOKEN="$(gh auth token)" PR_NUMBER=61456 REPO=vllm-project/vllm DRY_RUN=1 PR_FILE_CACHE_DIR=.github/workflows/.dup_pr_cache/files .venv/bin/python .github/workflows/scripts/detect_duplicate_prs.py
 """
 
+import json
 import os
+from pathlib import Path
 
 import numpy as np
 import requests
@@ -44,7 +49,7 @@ hashing_vectorizer = HashingVectorizer(
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
 PR_NUMBER = int(os.environ["PR_NUMBER"])
 REPO = os.environ["REPO"]
-DRY_RUN = os.getenv("DRY_RUN", "0").lower() in {"1", "true", "yes"}
+DRY_RUN = os.getenv("DRY_RUN", "1").lower() in {"1", "true", "yes"}
 
 HEADERS = {"Accept": "application/vnd.github+json"}
 if GITHUB_TOKEN:
@@ -52,27 +57,64 @@ if GITHUB_TOKEN:
 
 SIMILARITY_THRESHOLD = float(os.getenv("SIMILARITY_THRESHOLD", "0.75"))
 TOP_K = 5
-MAX_CANDIDATES = int(
-    os.getenv("MAX_CANDIDATES", os.getenv("MAX_OPEN_CANDIDATES", "120"))
-)
+MAX_CANDIDATES = int(os.getenv("MAX_CANDIDATES", "500"))
 PR_CANDIDATE_STATE = os.getenv("PR_CANDIDATE_STATE", "all")
 FILE_COMPARE_TOP_N = int(os.getenv("FILE_COMPARE_TOP_N", "20"))
+PREFETCH_CANDIDATE_FILES = os.getenv("PREFETCH_CANDIDATE_FILES", "1").lower() in {
+    "1",
+    "true",
+    "yes",
+}
 TEXT_WEIGHT = 0.75
 FILE_WEIGHT = 0.25
 COMMENT_MARKER = "<!-- duplicate-pr-checker -->"
+PR_FILE_CACHE_DIR = os.getenv("PR_FILE_CACHE_DIR", "")
+PR_FILE_CACHE_WRITE = os.getenv("PR_FILE_CACHE_WRITE", "1").lower() in {
+    "1",
+    "true",
+    "yes",
+}
+RUN_STATS = {
+    "api_requests": 0,
+    "file_cache_hits": 0,
+    "file_cache_misses": 0,
+    "file_cache_writes": 0,
+}
 
 
 def gh_get(url, params=None):
+    RUN_STATS["api_requests"] += 1
     r = requests.get(url, headers=HEADERS, params=params)
     r.raise_for_status()
     return r.json()
 
 
 def get_pr_files(pr_number):
+    cache_file = None
+    if PR_FILE_CACHE_DIR:
+        cache_dir = Path(PR_FILE_CACHE_DIR)
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        cache_file = cache_dir / f"{pr_number}.json"
+        if cache_file.exists():
+            try:
+                cached_files = json.loads(cache_file.read_text(encoding="utf-8"))
+                if isinstance(cached_files, list):
+                    RUN_STATS["file_cache_hits"] += 1
+                    return cached_files
+            except Exception:
+                pass
+    RUN_STATS["file_cache_misses"] += 1
     url = f"https://api.github.com/repos/{REPO}/pulls/{pr_number}/files"
     try:
         files = gh_get(url, params={"per_page": 100})
-        return [f["filename"] for f in files]
+        filenames = [f["filename"] for f in files]
+        if cache_file is not None and PR_FILE_CACHE_WRITE:
+            try:
+                cache_file.write_text(json.dumps(filenames), encoding="utf-8")
+                RUN_STATS["file_cache_writes"] += 1
+            except Exception:
+                pass
+        return filenames
     except Exception:
         return []
 
@@ -147,13 +189,22 @@ def find_existing_bot_comment(issue_number):
 
 
 def main():
+    def print_run_stats():
+        print(
+            "Stats: "
+            f"api_requests={RUN_STATS['api_requests']} "
+            f"file_cache_hits={RUN_STATS['file_cache_hits']} "
+            f"file_cache_misses={RUN_STATS['file_cache_misses']} "
+            f"file_cache_writes={RUN_STATS['file_cache_writes']}"
+        )
+
     # 1. Load current PR context.
     current_pr = gh_get(f"https://api.github.com/repos/{REPO}/pulls/{PR_NUMBER}")
     current_text = build_pr_text(current_pr)
     current_emb = get_embedding(current_text)
     current_files = get_pr_files(PR_NUMBER)
 
-    # 2. Fetch PR candidates (exclude current PR).
+    # 2. Fetch PR candidates (exclude current PR). ranked by most recent updated
     history_prs = []
     page = 1
     while len(history_prs) < MAX_CANDIDATES:
@@ -186,6 +237,12 @@ def main():
         text_sim = cosine_similarity(current_emb, emb)
         text_results.append((text_sim, pr))
 
+    # Warm file cache for all candidates so different PR runs can reuse
+    # a stable candidate pool across workflow executions.
+    if PREFETCH_CANDIDATE_FILES:
+        for pr in history_prs:
+            get_pr_files(pr["number"])
+
     text_results.sort(key=lambda x: -x[0])
     file_candidates = text_results[:FILE_COMPARE_TOP_N]
 
@@ -212,6 +269,7 @@ def main():
             print("Deleted stale duplicate checker comment.")
         else:
             print("No highly similar PRs found.")
+        print_run_stats()
         return
 
     lines = [
@@ -243,6 +301,7 @@ def main():
     else:
         post_comment(PR_NUMBER, body)
         print(f"Posted comment with {len(top_results)} similar PRs.")
+    print_run_stats()
 
 
 if __name__ == "__main__":
