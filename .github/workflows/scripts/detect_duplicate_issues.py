@@ -10,15 +10,17 @@ Workflow behavior:
 - Remove stale bot comment and duplicate label when no matches remain.
 
 Local debug example:
-GITHUB_TOKEN="$(gh auth token)" ISSUE_NUMBER=39774 REPO=vllm-project/vllm DRY_RUN=1 ISSUE_EMBED_CACHE_DIR=.github/workflows/.dup_issue_cache/embeddings .venv/bin/python .github/workflows/scripts/detect_duplicate_issues.py
+GITHUB_TOKEN="$(gh auth token)" ISSUE_NUMBER=39774 REPO=vllm-project/vllm DRY_RUN=1 \
+ISSUE_EMBED_CACHE_DIR=.github/workflows/.dup_issue_cache/embeddings \
+.venv/bin/python .github/workflows/scripts/detect_duplicate_issues.py
 """
 
 import json
 import os
-import re
 from pathlib import Path
 
 import numpy as np
+import regex as re
 import requests
 from sklearn.feature_extraction.text import HashingVectorizer
 
@@ -141,9 +143,7 @@ def _should_drop_code_block(lines: list[str]) -> bool:
     hint_hits = sum(1 for hint in ENV_BLOCK_HINTS if hint in block_text)
     if hint_hits >= 2:
         return True
-    if len(lines) >= 60 and hint_hits >= 1:
-        return True
-    return False
+    return bool(len(lines) >= 60 and hint_hits >= 1)
 
 
 def clean_issue_body(body: str) -> str:
@@ -412,8 +412,14 @@ def main():
     lines = [
         COMMENT_MARKER,
         "## 🔍 Potentially Related Issues\n",
-        f"The following {ISSUE_CANDIDATE_STATE} issues may be related to this issue:\n",
-        "If this is intentional and complementary work, feel free to ignore this notice.\n",
+        (
+            f"The following {ISSUE_CANDIDATE_STATE} issues may be related to this "
+            "issue:\n"
+        ),
+        (
+            "If this is intentional and complementary work, feel free to ignore "
+            "this notice.\n"
+        ),
         "| Match Score | Desc Similarity | Title Overlap | Issue # | State | Title |",
         "|---|---|---|---|---|---|",
     ]
@@ -429,7 +435,8 @@ def main():
         "\n> 🤖 Auto-detected by similarity signals (title/body/title-tokens)."
     )
     lines.append(
-        "This is a soft hint only. Please review manually to determine whether these are related work or true duplicates."
+        "This is a soft hint only. Please review manually to determine whether "
+        "these are related work or true duplicates."
     )
     body = "\n".join(lines)
 
