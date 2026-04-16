@@ -11,7 +11,9 @@ Workflow overview:
 5. Upsert one bot comment; remove stale comment when no matches remain.
 
 Local debug example:
-GITHUB_TOKEN="$(gh auth token)" PR_NUMBER=61456 REPO=vllm-project/vllm DRY_RUN=1 PR_FILE_CACHE_DIR=.github/workflows/.dup_pr_cache/files .venv/bin/python .github/workflows/scripts/detect_duplicate_prs.py
+GITHUB_TOKEN="$(gh auth token)" PR_NUMBER=61456 REPO=vllm-project/vllm DRY_RUN=1 \
+PR_FILE_CACHE_DIR=.github/workflows/.dup_pr_cache/files \
+.venv/bin/python .github/workflows/scripts/detect_duplicate_prs.py
 """
 
 import json
@@ -275,8 +277,14 @@ def main():
     lines = [
         COMMENT_MARKER,
         "## 🔍 Potentially Related PRs\n",
-        f"The following {PR_CANDIDATE_STATE} PRs may be related to this PR, and could overlap in intent or implementation:\n",
-        "If this is intentional and complementary work, feel free to ignore this notice.\n",
+        (
+            f"The following {PR_CANDIDATE_STATE} PRs may be related to this PR, "
+            "and could overlap in intent or implementation:\n"
+        ),
+        (
+            "If this is intentional and complementary work, feel free to ignore "
+            "this notice.\n"
+        ),
         "| Match Score | Desc Similarity | Files Overlap | PR # | State | Title |",
         "|---|---|---|---|---|---|",
     ]
@@ -292,7 +300,8 @@ def main():
         lines.append(row)
     lines.append("\n> 🤖 Auto-detected by similarity signals (title/body/files).")
     lines.append(
-        "This is a soft hint only. Please review manually to determine whether these are related work or true duplicates."
+        "This is a soft hint only. Please review manually to determine whether "
+        "these are related work or true duplicates."
     )
     body = "\n".join(lines)
     if existing_comment_id is not None:
