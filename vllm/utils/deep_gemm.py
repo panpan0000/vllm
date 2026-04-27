@@ -401,6 +401,7 @@ def get_paged_mqa_logits_metadata(
     _lazy_init()
     if _get_paged_mqa_logits_metadata_impl is None:
         return _missing()
+    context_lens = context_lens.contiguous()
     return _get_paged_mqa_logits_metadata_impl(context_lens, block_size, num_sms)
 
 
